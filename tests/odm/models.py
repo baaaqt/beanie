@@ -1,4 +1,5 @@
 import datetime
+import sys
 from enum import Enum
 from ipaddress import (
     IPv4Address,
@@ -18,11 +19,13 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    Type,
     Union,
 )
 from uuid import UUID, uuid4
 
 import pymongo
+from bson import Regex
 from pydantic import (
     UUID4,
     BaseModel,
@@ -34,7 +37,6 @@ from pydantic import (
     SecretBytes,
     SecretStr,
 )
-from pydantic.fields import FieldInfo
 from pydantic_core import core_schema
 from pymongo import IndexModel
 from typing_extensions import Annotated
@@ -51,6 +53,7 @@ from beanie import (
     ValidateOnSave,
 )
 from beanie.odm.actions import Delete, after_event, before_event
+from beanie.odm.custom_types import re
 from beanie.odm.custom_types.bson.binary import BsonBinary
 from beanie.odm.fields import BackLink, Link, PydanticObjectId
 from beanie.odm.settings.timeseries import TimeSeriesConfig
@@ -59,6 +62,16 @@ from beanie.odm.utils.pydantic import IS_PYDANTIC_V2
 
 if IS_PYDANTIC_V2:
     from pydantic import RootModel, validate_call
+
+if sys.version_info >= (3, 10):
+
+    def type_union(A, B):
+        return A | B
+
+else:
+
+    def type_union(A, B):
+        return Union[A, B]
 
 
 class Color:
@@ -72,36 +85,33 @@ class Color:
         return self.value
 
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, value):
+    def _validate(cls, value: Any) -> "Color":
         if isinstance(value, Color):
             return value
         if isinstance(value, dict):
             return Color(value["value"])
         return Color(value)
 
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls,
-        _source_type: Any,
-        _handler: Callable[[Any], core_schema.CoreSchema],  # type: ignore
-    ) -> core_schema.CoreSchema:  # type: ignore
-        def validate(value, _: FieldInfo) -> Color:
-            if isinstance(value, Color):
-                return value
-            if isinstance(value, dict):
-                return Color(value["value"])
-            return Color(value)
+    if IS_PYDANTIC_V2:
 
-        python_schema = core_schema.general_plain_validator_function(validate)
+        @classmethod
+        def __get_pydantic_core_schema__(
+            cls,
+            _source_type: Type[Any],
+            _handler: Callable[[Any], core_schema.CoreSchema],
+        ) -> core_schema.CoreSchema:
+            return core_schema.json_or_python_schema(
+                json_schema=core_schema.str_schema(),
+                python_schema=core_schema.no_info_plain_validator_function(
+                    cls._validate
+                ),
+            )
 
-        return core_schema.json_or_python_schema(
-            json_schema=core_schema.str_schema(),
-            python_schema=python_schema,
-        )
+    else:
+
+        @classmethod
+        def __get_validators__(cls):
+            yield cls._validate
 
 
 class Extra(str, Enum):
@@ -410,8 +420,7 @@ class DocumentWithActions2(Document):
         self.num_2 -= 1
 
 
-class InheritedDocumentWithActions(DocumentWithActions):
-    ...
+class InheritedDocumentWithActions(DocumentWithActions): ...
 
 
 class InternalDoc(BaseModel):
@@ -690,8 +699,7 @@ class Car(Vehicle, Fuelled):
     body: str
 
 
-class Bike(Vehicle, Fuelled):
-    ...
+class Bike(Vehicle, Fuelled): ...
 
 
 class Bus(Car, Fuelled):
@@ -901,6 +909,11 @@ class DocumentWithLink(Document):
     s: str = "TEST"
 
 
+class DocumentWithOptionalLink(Document):
+    link: Optional[Link["DocumentWithBackLink"]]
+    s: str = "TEST"
+
+
 class DocumentWithBackLink(Document):
     if IS_PYDANTIC_V2:
         back_link: BackLink[DocumentWithLink] = Field(
@@ -952,6 +965,24 @@ class DocumentWithOptionalListBackLink(Document):
     i: int = 1
 
 
+class DocumentWithUnionTypeExpressionOptionalBackLink(Document):
+    if IS_PYDANTIC_V2:
+        back_link_list: type_union(
+            List[BackLink[DocumentWithListLink]], None
+        ) = Field(json_schema_extra={"original_field": "link"})
+        back_link: type_union(BackLink[DocumentWithLink], None) = Field(
+            json_schema_extra={"original_field": "link"}
+        )
+    else:
+        back_link_list: type_union(
+            List[BackLink[DocumentWithListLink]], None
+        ) = Field(original_field="link")
+        back_link: type_union(BackLink[DocumentWithLink], None) = Field(
+            original_field="link"
+        )
+    i: int = 1
+
+
 class DocumentToBeLinked(Document):
     s: str = "TEST"
 
@@ -962,7 +993,9 @@ class DocumentWithListOfLinks(Document):
 
 
 class DocumentWithTimeStampToTestConsistency(Document):
-    ts: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
+    ts: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
+    )
 
 
 class DocumentWithIndexMerging1(Document):
@@ -1107,3 +1140,29 @@ class LongSelfLink(Document):
 
     class Settings:
         max_nesting_depth = 50
+
+
+class DictEnum(str, Enum):
+    RED = "Red"
+    BLUE = "Blue"
+
+
+class DocumentWithEnumKeysDict(Document):
+    color: Dict[DictEnum, str]
+
+
+class BsonRegexDoc(Document):
+    regex: Optional[Regex] = None
+
+    if IS_PYDANTIC_V2:
+        model_config = ConfigDict(
+            arbitrary_types_allowed=True,
+        )
+    else:
+
+        class Config:
+            arbitrary_types_allowed = True
+
+
+class NativeRegexDoc(Document):
+    regex: Optional[re.Pattern]
